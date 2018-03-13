@@ -1,8 +1,10 @@
 """Fairly basic set of tools for real-time data augmentation on image data.
+
 Can easily be extended to include new transformations,
 new preprocessing methods, etc...
 """
 from __future__ import absolute_import
+from __future__ import division
 from __future__ import print_function
 
 import numpy as np
@@ -20,10 +22,10 @@ from .. import backend as K
 from ..utils.data_utils import Sequence
 
 try:
+    from PIL import ImageEnhance
     from PIL import Image as pil_image
 except ImportError:
     pil_image = None
-
 
 if pil_image is not None:
     _PIL_INTERPOLATION_METHODS = {
@@ -60,7 +62,7 @@ def random_rotation(x, rg, row_axis=1, col_axis=2, channel_axis=0,
     # Returns
         Rotated Numpy image tensor.
     """
-    theta = np.pi / 180 * np.random.uniform(-rg, rg)
+    theta = np.deg2rad(np.random.uniform(-rg, rg))
     rotation_matrix = np.array([[np.cos(theta), -np.sin(theta), 0],
                                 [np.sin(theta), np.cos(theta), 0],
                                 [0, 0, 1]])
@@ -109,7 +111,7 @@ def random_shear(x, intensity, row_axis=1, col_axis=2, channel_axis=0,
 
     # Arguments
         x: Input tensor. Must be 3D.
-        intensity: Transformation intensity.
+        intensity: Transformation intensity in degrees.
         row_axis: Index of axis for rows in the input tensor.
         col_axis: Index of axis for columns in the input tensor.
         channel_axis: Index of axis for channels in the input tensor.
@@ -122,7 +124,7 @@ def random_shear(x, intensity, row_axis=1, col_axis=2, channel_axis=0,
     # Returns
         Sheared Numpy image tensor.
     """
-    shear = np.random.uniform(-intensity, intensity)
+    shear = np.deg2rad(np.random.uniform(-intensity, intensity))
     shear_matrix = np.array([[1, -np.sin(shear), 0],
                              [0, np.cos(shear), 0],
                              [0, 0, 1]])
@@ -183,6 +185,19 @@ def random_channel_shift(x, intensity, channel_axis=0):
     return x
 
 
+def random_brightness(x, brightness_range):
+    if len(brightness_range) != 2:
+        raise ValueError('`brightness_range should be tuple or list of two floats. '
+                         'Received arg: ', brightness_range)
+
+    x = array_to_img(x)
+    x = imgenhancer_Brightness = ImageEnhance.Brightness(x)
+    u = np.random.uniform(brightness_range[0], brightness_range[1])
+    x = imgenhancer_Brightness.enhance(u)
+    x = img_to_array(x)
+    return x
+
+
 def transform_matrix_offset_center(matrix, x, y):
     o_x = float(x) / 2 + 0.5
     o_y = float(y) / 2 + 0.5
@@ -219,7 +234,7 @@ def apply_transform(x,
         x_channel,
         final_affine_matrix,
         final_offset,
-        order=0,
+        order=1,
         mode=fill_mode,
         cval=cval) for x_channel in x]
     x = np.stack(channel_images, axis=0)
@@ -382,9 +397,10 @@ class ImageDataGenerator(object):
         zca_whitening: apply ZCA whitening.
         zca_epsilon: epsilon for ZCA whitening. Default is 1e-6.
         rotation_range: degrees (0 to 180).
-        width_shift_range: fraction of total width.
-        height_shift_range: fraction of total height.
-        shear_range: shear intensity (shear angle in radians).
+        width_shift_range: fraction of total width, if < 1, or pixels if >= 1.
+        height_shift_range: fraction of total height, if < 1, or pixels if >= 1.
+        brightness_range: the range of brightness to apply
+        shear_range: shear intensity (shear angle in degrees).
         zoom_range: amount of zoom. if scalar z, zoom will be randomly picked
             in the range [1-z, 1+z]. A sequence of two can be passed instead
             to select this range.
@@ -392,6 +408,11 @@ class ImageDataGenerator(object):
         fill_mode: points outside the boundaries are filled according to the
             given mode ('constant', 'nearest', 'reflect' or 'wrap'). Default
             is 'nearest'.
+            Points outside the boundaries of the input are filled according to the given mode:
+                'constant': kkkkkkkk|abcd|kkkkkkkk (cval=k)
+                'nearest':  aaaaaaaa|abcd|dddddddd
+                'reflect':  abcddcba|abcd|dcbaabcd
+                'wrap':  abcdabcd|abcd|abcdabcd
         cval: value used for points outside the boundaries when fill_mode is
             'constant'. Default is 0.
         horizontal_flip: whether to randomly flip images horizontally.
@@ -410,6 +431,7 @@ class ImageDataGenerator(object):
             It defaults to the `image_data_format` value found in your
             Keras config file at `~/.keras/keras.json`.
             If you never set it, then it will be "channels_last".
+        validation_split: fraction of images reserved for validation (strictly between 0 and 1).
     """
 
     def __init__(self,
@@ -422,6 +444,7 @@ class ImageDataGenerator(object):
                  rotation_range=0.,
                  width_shift_range=0.,
                  height_shift_range=0.,
+                 brightness_range=None,
                  shear_range=0.,
                  zoom_range=0.,
                  channel_shift_range=0.,
@@ -431,7 +454,8 @@ class ImageDataGenerator(object):
                  vertical_flip=False,
                  rescale=None,
                  preprocessing_function=None,
-                 data_format=None):
+                 data_format=None,
+                 validation_split=0.0):
         if data_format is None:
             data_format = K.image_data_format()
         self.featurewise_center = featurewise_center
@@ -443,6 +467,7 @@ class ImageDataGenerator(object):
         self.rotation_range = rotation_range
         self.width_shift_range = width_shift_range
         self.height_shift_range = height_shift_range
+        self.brightness_range = brightness_range
         self.shear_range = shear_range
         self.zoom_range = zoom_range
         self.channel_shift_range = channel_shift_range
@@ -466,6 +491,10 @@ class ImageDataGenerator(object):
             self.channel_axis = 3
             self.row_axis = 1
             self.col_axis = 2
+        if validation_split and not 0 < validation_split < 1:
+            raise ValueError('`validation_split` must be strictly between 0 and 1. '
+                             ' Received arg: ', validation_split)
+        self._validation_split = validation_split
 
         self.mean = None
         self.std = None
@@ -479,9 +508,35 @@ class ImageDataGenerator(object):
             raise ValueError('`zoom_range` should be a float or '
                              'a tuple or list of two floats. '
                              'Received arg: ', zoom_range)
+        if zca_whitening:
+            if not featurewise_center:
+                self.featurewise_center = True
+                warnings.warn('This ImageDataGenerator specifies '
+                              '`zca_whitening`, which overrides '
+                              'setting of `featurewise_center`.')
+            if featurewise_std_normalization:
+                self.featurewise_std_normalization = False
+                warnings.warn('This ImageDataGenerator specifies '
+                              '`zca_whitening` '
+                              'which overrides setting of'
+                              '`featurewise_std_normalization`.')
+        if featurewise_std_normalization:
+            if not featurewise_center:
+                self.featurewise_center = True
+                warnings.warn('This ImageDataGenerator specifies '
+                              '`featurewise_std_normalization`, '
+                              'which overrides setting of '
+                              '`featurewise_center`.')
+        if samplewise_std_normalization:
+            if not samplewise_center:
+                self.samplewise_center = True
+                warnings.warn('This ImageDataGenerator specifies '
+                              '`samplewise_std_normalization`, '
+                              'which overrides setting of '
+                              '`samplewise_center`.')
 
     def flow(self, x, y=None, batch_size=32, shuffle=True, seed=None,
-             save_to_dir=None, save_prefix='', save_format='png'):
+             save_to_dir=None, save_prefix='', save_format='png', subset=None):
         return NumpyArrayIterator(
             x, y, self,
             batch_size=batch_size,
@@ -490,7 +545,8 @@ class ImageDataGenerator(object):
             data_format=self.data_format,
             save_to_dir=save_to_dir,
             save_prefix=save_prefix,
-            save_format=save_format)
+            save_format=save_format,
+            subset=subset)
 
     def flow_from_directory(self, directory,
                             target_size=(256, 256), color_mode='rgb',
@@ -500,6 +556,7 @@ class ImageDataGenerator(object):
                             save_prefix='',
                             save_format='png',
                             follow_links=False,
+                            subset=None,
                             interpolation='nearest'):
         return DirectoryIterator(
             directory, self,
@@ -511,6 +568,7 @@ class ImageDataGenerator(object):
             save_prefix=save_prefix,
             save_format=save_format,
             follow_links=follow_links,
+            subset=subset,
             interpolation=interpolation)
 
     def standardize(self, x):
@@ -523,28 +581,28 @@ class ImageDataGenerator(object):
             The inputs, normalized.
         """
         if self.preprocessing_function:
-            x = self.preprocessing_function(x)
+            x = self.image_data_generator.preprocessing_function(x)
         if self.rescale:
             x *= self.rescale
         if self.samplewise_center:
             x -= np.mean(x, keepdims=True)
         if self.samplewise_std_normalization:
-            x /= np.std(x, keepdims=True) + 1e-7
+            x /= (np.std(x, keepdims=True) + K.epsilon())
 
         if self.featurewise_center:
             if self.mean is not None:
                 x -= self.mean
             else:
                 warnings.warn('This ImageDataGenerator specifies '
-                              '`featurewise_center`, but it hasn\'t'
+                              '`featurewise_center`, but it hasn\'t '
                               'been fit on any training data. Fit it '
                               'first by calling `.fit(numpy_data)`.')
         if self.featurewise_std_normalization:
             if self.std is not None:
-                x /= (self.std + 1e-7)
+                x /= (self.std + K.epsilon())
             else:
                 warnings.warn('This ImageDataGenerator specifies '
-                              '`featurewise_std_normalization`, but it hasn\'t'
+                              '`featurewise_std_normalization`, but it hasn\'t '
                               'been fit on any training data. Fit it '
                               'first by calling `.fit(numpy_data)`.')
         if self.zca_whitening:
@@ -554,7 +612,7 @@ class ImageDataGenerator(object):
                 x = np.reshape(whitex, x.shape)
             else:
                 warnings.warn('This ImageDataGenerator specifies '
-                              '`zca_whitening`, but it hasn\'t'
+                              '`zca_whitening`, but it hasn\'t '
                               'been fit on any training data. Fit it '
                               'first by calling `.fit(numpy_data)`.')
         return x
@@ -580,22 +638,26 @@ class ImageDataGenerator(object):
         # use composition of homographies
         # to generate final transform that needs to be applied
         if self.rotation_range:
-            theta = np.pi / 180 * np.random.uniform(-self.rotation_range, self.rotation_range)
+            theta = np.deg2rad(np.random.uniform(-self.rotation_range, self.rotation_range))
         else:
             theta = 0
 
         if self.height_shift_range:
-            tx = np.random.uniform(-self.height_shift_range, self.height_shift_range) * x.shape[img_row_axis]
+            tx = np.random.uniform(-self.height_shift_range, self.height_shift_range)
+            if self.height_shift_range < 1:
+                tx *= x.shape[img_row_axis]
         else:
             tx = 0
 
         if self.width_shift_range:
-            ty = np.random.uniform(-self.width_shift_range, self.width_shift_range) * x.shape[img_col_axis]
+            ty = np.random.uniform(-self.width_shift_range, self.width_shift_range)
+            if self.width_shift_range < 1:
+                ty *= x.shape[img_col_axis]
         else:
             ty = 0
 
         if self.shear_range:
-            shear = np.random.uniform(-self.shear_range, self.shear_range)
+            shear = np.deg2rad(np.random.uniform(-self.shear_range, self.shear_range))
         else:
             shear = 0
 
@@ -646,6 +708,9 @@ class ImageDataGenerator(object):
         if self.vertical_flip:
             if np.random.random() < 0.5:
                 x = flip_axis(x, img_row_axis)
+
+        if self.brightness_range is not None:
+            x = random_brightness(x, self.brightness_range)
 
         return x
 
@@ -713,7 +778,8 @@ class ImageDataGenerator(object):
             flat_x = np.reshape(x, (x.shape[0], x.shape[1] * x.shape[2] * x.shape[3]))
             sigma = np.dot(flat_x.T, flat_x) / flat_x.shape[0]
             u, s, _ = linalg.svd(sigma)
-            self.principal_components = np.dot(np.dot(u, np.diag(1. / np.sqrt(s + self.zca_epsilon))), u.T)
+            s_inv = 1. / np.sqrt(s[np.newaxis] + self.zca_epsilon)
+            self.principal_components = (u * s_inv).dot(u.T)
 
 
 class Iterator(Sequence):
@@ -827,22 +893,36 @@ class NumpyArrayIterator(Iterator):
             images (if `save_to_dir` is set).
         save_format: Format to use for saving sample images
             (if `save_to_dir` is set).
+        subset: Subset of data (`"training"` or `"validation"`) if
+            validation_split is set in ImageDataGenerator.
     """
 
     def __init__(self, x, y, image_data_generator,
                  batch_size=32, shuffle=False, seed=None,
                  data_format=None,
-                 save_to_dir=None, save_prefix='', save_format='png'):
+                 save_to_dir=None, save_prefix='', save_format='png',
+                 subset=None):
         if y is not None and len(x) != len(y):
-            raise ValueError('X (images tensor) and y (labels) '
+            raise ValueError('`x` (images tensor) and `y` (labels) '
                              'should have the same length. '
-                             'Found: X.shape = %s, y.shape = %s' %
+                             'Found: x.shape = %s, y.shape = %s' %
                              (np.asarray(x).shape, np.asarray(y).shape))
-
+        if subset is not None:
+            if subset not in {'training', 'validation'}:
+                raise ValueError('Invalid subset name:', subset,
+                                 '; expected "training" or "validation".')
+            split_idx = int(len(x) * image_data_generator._validation_split)
+            if subset == 'validation':
+                x = x[:split_idx]
+                if y is not None:
+                    y = y[:split_idx]
+            else:
+                x = x[split_idx:]
+                if y is not None:
+                    y = y[split_idx:]
         if data_format is None:
             data_format = K.image_data_format()
         self.x = np.asarray(x, dtype=K.floatx())
-
         if self.x.ndim != 4:
             raise ValueError('Input data in `NumpyArrayIterator` '
                              'should have rank 4. You passed an array '
@@ -902,44 +982,73 @@ class NumpyArrayIterator(Iterator):
         return self._get_batches_of_transformed_samples(index_array)
 
 
-def _count_valid_files_in_directory(directory, white_list_formats, follow_links):
-    """Count files with extension in `white_list_formats` contained in a directory.
+def _iter_valid_files(directory, white_list_formats, follow_links):
+    """Count files with extension in `white_list_formats` contained in directory.
 
     # Arguments
-        directory: absolute path to the directory containing files to be counted
+        directory: absolute path to the directory
+            containing files to be counted
         white_list_formats: set of strings containing allowed extensions for
             the files to be counted.
+        follow_links: boolean.
+
+    # Yields
+        tuple of (root, filename) with extension in `white_list_formats`.
+    """
+    def _recursive_list(subpath):
+        return sorted(os.walk(subpath, followlinks=follow_links), key=lambda x: x[0])
+
+    for root, _, files in _recursive_list(directory):
+        for fname in sorted(files):
+            for extension in white_list_formats:
+                if fname.lower().endswith('.tiff'):
+                    warnings.warn('Using \'.tiff\' files with multiple bands will cause distortion. '
+                                  'Please verify your output.')
+                if fname.lower().endswith('.' + extension):
+                    yield root, fname
+
+
+def _count_valid_files_in_directory(directory, white_list_formats, split, follow_links):
+    """Count files with extension in `white_list_formats` contained in directory.
+
+    # Arguments
+        directory: absolute path to the directory
+            containing files to be counted
+        white_list_formats: set of strings containing allowed extensions for
+            the files to be counted.
+        split: tuple of floats (e.g. `(0.2, 0.6)`) to only take into
+            account a certain fraction of files in each directory.
+            E.g.: `segment=(0.6, 1.0)` would only account for last 40 percent
+            of images in each directory.
+        follow_links: boolean.
 
     # Returns
         the count of files with extension in `white_list_formats` contained in
         the directory.
     """
-    def _recursive_list(subpath):
-        return sorted(os.walk(subpath, followlinks=follow_links), key=lambda tpl: tpl[0])
-
-    samples = 0
-    for root, _, files in _recursive_list(directory):
-        for fname in files:
-            is_valid = False
-            for extension in white_list_formats:
-                if fname.lower().endswith('.' + extension):
-                    is_valid = True
-                    break
-            if is_valid:
-                samples += 1
-    return samples
+    num_files = len(list(_iter_valid_files(directory, white_list_formats, follow_links)))
+    if split:
+        start, stop = int(split[0] * num_files), int(split[1] * num_files)
+    else:
+        start, stop = 0, num_files
+    return stop - start
 
 
-def _list_valid_filenames_in_directory(directory, white_list_formats,
+def _list_valid_filenames_in_directory(directory, white_list_formats, split,
                                        class_indices, follow_links):
-    """List paths of files in `subdir` relative from `directory` whose extensions are in `white_list_formats`.
+    """List paths of files in `subdir` with extensions in `white_list_formats`.
 
     # Arguments
         directory: absolute path to a directory containing the files to list.
             The directory name is used as class label and must be a key of `class_indices`.
         white_list_formats: set of strings containing allowed extensions for
             the files to be counted.
+        split: tuple of floats (e.g. `(0.2, 0.6)`) to only take into
+            account a certain fraction of files in each directory.
+            E.g.: `segment=(0.6, 1.0)` would only account for last 40 percent
+            of images in each directory.
         class_indices: dictionary mapping a class name to its index.
+        follow_links: boolean.
 
     # Returns
         classes: a list of class indices
@@ -947,25 +1056,22 @@ def _list_valid_filenames_in_directory(directory, white_list_formats,
             `directory`'s parent (e.g., if `directory` is "dataset/class1",
             the filenames will be ["class1/file1.jpg", "class1/file2.jpg", ...]).
     """
-    def _recursive_list(subpath):
-        return sorted(os.walk(subpath, followlinks=follow_links), key=lambda tpl: tpl[0])
+    dirname = os.path.basename(directory)
+    if split:
+        num_files = len(list(_iter_valid_files(directory, white_list_formats, follow_links)))
+        start, stop = int(split[0] * num_files), int(split[1] * num_files)
+        valid_files = list(_iter_valid_files(directory, white_list_formats, follow_links))[start: stop]
+    else:
+        valid_files = _iter_valid_files(directory, white_list_formats, follow_links)
 
     classes = []
     filenames = []
-    subdir = os.path.basename(directory)
-    basedir = os.path.dirname(directory)
-    for root, _, files in _recursive_list(directory):
-        for fname in sorted(files):
-            is_valid = False
-            for extension in white_list_formats:
-                if fname.lower().endswith('.' + extension):
-                    is_valid = True
-                    break
-            if is_valid:
-                classes.append(class_indices[subdir])
-                # add filename relative to directory
-                absolute_path = os.path.join(root, fname)
-                filenames.append(os.path.relpath(absolute_path, basedir))
+    for root, fname in valid_files:
+        classes.append(class_indices[dirname])
+        absolute_path = os.path.join(root, fname)
+        relative_path = os.path.join(dirname, os.path.relpath(absolute_path, directory))
+        filenames.append(relative_path)
+
     return classes, filenames
 
 
@@ -1004,6 +1110,8 @@ class DirectoryIterator(Iterator):
             images (if `save_to_dir` is set).
         save_format: Format to use for saving sample images
             (if `save_to_dir` is set).
+        subset: Subset of data (`"training"` or `"validation"`) if
+            validation_split is set in ImageDataGenerator.
         interpolation: Interpolation method used to resample the image if the
             target size is different from that of the loaded image.
             Supported methods are "nearest", "bilinear", and "bicubic".
@@ -1016,9 +1124,11 @@ class DirectoryIterator(Iterator):
                  target_size=(256, 256), color_mode='rgb',
                  classes=None, class_mode='categorical',
                  batch_size=32, shuffle=True, seed=None,
-                 data_format=None, save_to_dir=None,
-                 save_prefix='', save_format='png',
-                 follow_links=False, interpolation='nearest'):
+                 data_format=None,
+                 save_to_dir=None, save_prefix='', save_format='png',
+                 follow_links=False,
+                 subset=None,
+                 interpolation='nearest'):
         if data_format is None:
             data_format = K.image_data_format()
         self.directory = directory
@@ -1052,7 +1162,20 @@ class DirectoryIterator(Iterator):
         self.save_format = save_format
         self.interpolation = interpolation
 
-        white_list_formats = {'png', 'jpg', 'jpeg', 'bmp', 'ppm'}
+        if subset is not None:
+            validation_split = self.image_data_generator._validation_split
+            if subset == 'validation':
+                split = (0, validation_split)
+            elif subset == 'training':
+                split = (validation_split, 1)
+            else:
+                raise ValueError('Invalid subset name: ', subset,
+                                 '; expected "training" or "validation"')
+        else:
+            split = None
+        self.subset = subset
+
+        white_list_formats = {'png', 'jpg', 'jpeg', 'bmp', 'ppm', 'tif', 'tiff'}
 
         # first, count the number of samples and classes
         self.samples = 0
@@ -1068,7 +1191,8 @@ class DirectoryIterator(Iterator):
         pool = multiprocessing.pool.ThreadPool()
         function_partial = partial(_count_valid_files_in_directory,
                                    white_list_formats=white_list_formats,
-                                   follow_links=follow_links)
+                                   follow_links=follow_links,
+                                   split=split)
         self.samples = sum(pool.map(function_partial,
                                     (os.path.join(directory, subdir)
                                      for subdir in classes)))
@@ -1083,13 +1207,14 @@ class DirectoryIterator(Iterator):
         i = 0
         for dirpath in (os.path.join(directory, subdir) for subdir in classes):
             results.append(pool.apply_async(_list_valid_filenames_in_directory,
-                                            (dirpath, white_list_formats,
+                                            (dirpath, white_list_formats, split,
                                              self.class_indices, follow_links)))
         for res in results:
             classes, filenames = res.get()
             self.classes[i:i + len(classes)] = classes
             self.filenames += filenames
             i += len(classes)
+
         pool.close()
         pool.join()
         super(DirectoryIterator, self).__init__(self.samples, batch_size, shuffle, seed)

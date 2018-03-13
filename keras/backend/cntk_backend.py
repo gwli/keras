@@ -1,4 +1,7 @@
+from __future__ import absolute_import
+from __future__ import division
 from __future__ import print_function
+
 import cntk as C
 import numpy as np
 from .common import floatx, epsilon, image_dim_ordering, image_data_format
@@ -21,7 +24,7 @@ if dev.type() == 0:
 
 # A learning phase is a bool tensor used to run Keras models in
 # either train mode (learning_phase == 1) or test mode (learning_phase == 0).
-_LEARNING_PHASE = C.constant(shape=(), dtype=np.float32, value=1.0, name="_keras_learning_phase")
+_LEARNING_PHASE = C.constant(shape=(), dtype=np.float32, value=1.0, name='_keras_learning_phase')
 _UID_PREFIXES = defaultdict(int)
 
 # cntk doesn't support gradient as symbolic op, to hook up with keras model,
@@ -444,7 +447,7 @@ def random_normal(shape, mean=0.0, stddev=1.0, dtype=None, seed=None):
                              'Please provide fixed dimension '
                              'instead of `None`.')
     # how to apply mean and stddev
-    return random_normal_variable(shape=shape, mean=mean, scale=1.0)
+    return random_normal_variable(shape=shape, mean=mean, scale=1.0, seed=seed)
 
 
 def truncated_normal(shape, mean=0.0, stddev=1.0, dtype=None, seed=None):
@@ -562,7 +565,7 @@ def transpose(x):
 def gather(reference, indices):
     # There is a bug in cntk gather op which may cause crash.
     # We have made a fix but not catched in CNTK 2.1 release.
-    # Will udpate with gather op in next release
+    # Will update with gather op in next release
     if _get_cntk_version() >= 2.2:
         return C.ops.gather(reference, indices)
     else:
@@ -1052,7 +1055,7 @@ def batch_normalization(x, mean, var, beta, gamma, epsilon=1e-3):
     elif ndim(beta) == ndim(x) and shape(beta)[0] == 1:
         beta = _reshape_dummy_dim(beta, [0])
 
-    return gamma * ((x - mean) / C.sqrt(var + epsilon)) + beta
+    return (x - mean) / (C.sqrt(var) + epsilon) * gamma + beta
 
 
 def concatenate(tensors, axis=-1):
@@ -1502,14 +1505,78 @@ def conv2d(x, kernel, strides=(1, 1), padding='valid',
     return _postprocess_conv2d_output(x, data_format)
 
 
+def separable_conv1d(x, depthwise_kernel, pointwise_kernel, strides=1,
+                     padding='valid', data_format=None, dilation_rate=1):
+    raise NotImplementedError
+
+
 def separable_conv2d(x, depthwise_kernel, pointwise_kernel, strides=(1, 1),
                      padding='valid', data_format=None, dilation_rate=(1, 1)):
-    raise NotImplementedError
+    if data_format is None:
+        data_format = image_data_format()
+    if data_format not in {'channels_first', 'channels_last'}:
+        raise ValueError('Unknown data_format ' + str(data_format))
+
+    x = _preprocess_conv2d_input(x, data_format)
+    depthwise_kernel = _preprocess_conv2d_kernel(depthwise_kernel, data_format)
+    depthwise_kernel = C.reshape(C.transpose(depthwise_kernel, (1, 0, 2, 3)),
+                                 (-1, 1) + depthwise_kernel.shape[2:])
+    pointwise_kernel = _preprocess_conv2d_kernel(pointwise_kernel, data_format)
+    padding = _preprocess_border_mode(padding)
+
+    if dilation_rate == (1, 1):
+        strides = (1,) + strides
+        x = C.convolution(depthwise_kernel, x,
+                          strides=strides,
+                          auto_padding=[False, padding, padding],
+                          groups=x.shape[0])
+        x = C.convolution(pointwise_kernel, x,
+                          strides=(1, 1, 1),
+                          auto_padding=[False])
+    else:
+        if dilation_rate[0] != dilation_rate[1]:
+            raise ValueError('CNTK Backend: non-square dilation_rate is '
+                             'not supported.')
+        if strides != (1, 1):
+            raise ValueError('Invalid strides for dilated convolution')
+        x = C.convolution(depthwise_kernel, x,
+                          strides=dilation_rate[0],
+                          auto_padding=[False, padding, padding])
+        x = C.convolution(pointwise_kernel, x,
+                          strides=(1, 1, 1),
+                          auto_padding=[False])
+    return _postprocess_conv2d_output(x, data_format)
 
 
 def depthwise_conv2d(x, depthwise_kernel, strides=(1, 1), padding='valid',
                      data_format=None, dilation_rate=(1, 1)):
-    raise NotImplementedError
+    if data_format is None:
+        data_format = image_data_format()
+    if data_format not in {'channels_first', 'channels_last'}:
+        raise ValueError('Unknown data_format ' + str(data_format))
+
+    x = _preprocess_conv2d_input(x, data_format)
+    depthwise_kernel = _preprocess_conv2d_kernel(depthwise_kernel, data_format)
+    depthwise_kernel = C.reshape(C.transpose(depthwise_kernel, (1, 0, 2, 3)),
+                                 (-1, 1) + depthwise_kernel.shape[2:])
+    padding = _preprocess_border_mode(padding)
+    if dilation_rate == (1, 1):
+        strides = (1,) + strides
+        x = C.convolution(depthwise_kernel, x,
+                          strides=strides,
+                          auto_padding=[False, padding, padding],
+                          groups=x.shape[0])
+    else:
+        if dilation_rate[0] != dilation_rate[1]:
+            raise ValueError('CNTK Backend: non-square dilation_rate is '
+                             'not supported.')
+        if strides != (1, 1):
+            raise ValueError('Invalid strides for dilated convolution')
+        x = C.convolution(depthwise_kernel, x,
+                          strides=dilation_rate[0],
+                          auto_padding=[False, padding, padding],
+                          groups=x.shape[0])
+    return _postprocess_conv2d_output(x, data_format)
 
 
 def conv3d(x, kernel, strides=(1, 1, 1), padding='valid',
@@ -1660,8 +1727,8 @@ def batch_flatten(x):
     return x
 
 
-def softmax(x):
-    return C.softmax(x)
+def softmax(x, axis=-1):
+    return C.softmax(x, axis=axis)
 
 
 def softplus(x):
@@ -2002,8 +2069,8 @@ def spatial_3d_padding(x, padding=((1, 1), (1, 1), (1, 1)), data_format=None):
     return x
 
 
-def one_hot(indices, nb_classes):
-    return C.one_hot(indices, nb_classes)
+def one_hot(indices, num_classes):
+    return C.one_hot(indices, num_classes)
 
 
 def get_value(x):
@@ -2031,8 +2098,8 @@ def batch_get_value(xs):
 def set_value(x, value):
     if (isinstance(x, C.variables.Parameter) or
        isinstance(x, C.variables.Constant)):
-        if isinstance(value, float):
-            value = np.full(x.shape, value)
+        if isinstance(value, (float, int)):
+            value = np.full(x.shape, value, dtype=floatx())
         x.value = value
     else:
         raise NotImplementedError
@@ -2071,8 +2138,8 @@ def switch(condition, then_expression, else_expression):
         raise ValueError('Rank of condition should be less'
                          ' than or equal to rank of then and'
                          ' else expressions. ndim(condition)=' +
-                         str(cond_ndim) + ', ndim(then_expression)'
-                         '=' + str(expr_ndim))
+                         str(ndim_cond) + ', ndim(then_expression)'
+                         '=' + str(ndim_expr))
     elif ndim_cond < ndim_expr:
         shape_expr = int_shape(then_expression)
         ndim_diff = ndim_expr - ndim_cond
@@ -2330,6 +2397,9 @@ def _get_cntk_version():
     version = C.__version__
     if version.endswith('+'):
         version = version[:-1]
+    # for hot fix, ignore all the . except the first one.
+    if len(version) > 2 and version[1] == '.':
+        version = version[:2] + version[2:].replace('.', '')
     try:
         return float(version)
     except:
